@@ -88,8 +88,9 @@ def part_a_demonstrate_original(tmp):
     # Generous per-read timeout: many times the expected conversion so a real conversion
     # is never mistaken for a stall.
     timeout_s = expected_one_shot_seconds(ORIGINAL_DEMO_AVG) * 6 + 0.3
-    print("  averaging x{}, per-read timeout {:.2f}s, {} iterations".format(
-        samples, timeout_s, ORIGINAL_DEMO_ITERS))
+    print(
+        f"  averaging x{samples}, per-read timeout {timeout_s:.2f}s, {ORIGINAL_DEMO_ITERS} iterations"
+    )
 
     stalls = 0
     first_stall = None
@@ -99,11 +100,12 @@ def part_a_demonstrate_original(tmp):
             stalls += 1
             if first_stall is None:
                 first_stall = i + 1
-            print("  [{}] STALLED: Data_Ready never observed <- reproduces issue #10".format(i + 1))
+            print(f"  [{i + 1}] STALLED: Data_Ready never observed <- reproduces issue #10")
 
     if stalls:
-        print("  -> original path stalled {}/{} times (first at #{}).".format(
-            stalls, ORIGINAL_DEMO_ITERS, first_stall))
+        print(
+            f"  -> original path stalled {stalls}/{ORIGINAL_DEMO_ITERS} times (first at #{first_stall})."
+        )
     else:
         print("  -> no stall this run; the race is probabilistic. Try more iterations or")
         print("     higher averaging. The fixed path below avoids the race entirely.")
@@ -123,17 +125,16 @@ def part_b_regression_guard(tmp):
             start = time.monotonic()
             temp = tmp.take_single_measurement()
             elapsed = time.monotonic() - start
-            if elapsed > worst_s:
-                worst_s = elapsed
+            worst_s = max(worst_s, elapsed)
             if elapsed > bound_s:
                 failures += 1
-                print("  x{} [{}] SLOW: {:.3f}s > bound {:.3f}s".format(
-                    samples, i + 1, elapsed, bound_s))
+                print(f"  x{samples} [{i + 1}] SLOW: {elapsed:.3f}s > bound {bound_s:.3f}s")
             if not TEMP_MIN_C <= temp <= TEMP_MAX_C:
                 failures += 1
-                print("  x{} [{}] OUT OF RANGE: {:.2f} C".format(samples, i + 1, temp))
-        print("  averaging x{:<2} {} reads OK (worst call {:.3f}s, bound {:.3f}s)".format(
-            samples, iters, worst_s, bound_s))
+                print(f"  x{samples} [{i + 1}] OUT OF RANGE: {temp:.2f} C")
+        print(
+            f"  averaging x{samples:<2} {iters} reads OK (worst call {worst_s:.3f}s, bound {bound_s:.3f}s)"
+        )
     print("")
     return failures
 
@@ -156,7 +157,8 @@ def main():
     if failures == 0:
         print("REGRESSION GUARD: PASS -- every one-shot completed with a sane value, no stalls.")
     else:
-        print("REGRESSION GUARD: FAIL -- {} problem(s) detected.".format(failures))
+        print(f"REGRESSION GUARD: FAIL -- {failures} problem(s) detected.")
 
+    print("~~END~~")
 
 main()
