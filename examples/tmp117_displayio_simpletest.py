@@ -26,7 +26,6 @@ except Exception:
 # If not available then try the board.I2C
 if i2c is None:
     i2c = board.I2C()  # uses board.SCL and board.SDA
-i2c = board.I2C()  # uses board.SCL and board.SDA
 tmp117 = adafruit_tmp117.TMP117(i2c)
 
 # Create Label(s) to show the readings. If you have a very small
