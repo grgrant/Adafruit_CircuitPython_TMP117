@@ -54,7 +54,7 @@ except ImportError:
     pass
 
 __version__ = "0.0.0+auto.0"
-__repo__ = "https:#github.com/adafruit/Adafruit_CircuitPython_TMP117.git"
+__repo__ = "https://github.com/adafruit/Adafruit_CircuitPython_TMP117.git"
 
 
 _I2C_ADDR = 0x48  # default I2C Address
@@ -68,26 +68,44 @@ _EEPROM2 = const(0x06)
 _TEMP_OFFSET = const(0x07)
 _EEPROM3 = const(0x08)
 _DEVICE_ID = const(0x0F)
-_DEVICE_ID_VALUE = 0x0117
-_TMP119_ID_VALUE = 0x2117
+# DID[11:0] is shared by both parts (0x117); bits[15:12] are a silicon-revision field.
+_DEVICE_ID_DID = 0x117
+_DEVICE_ID_MASK = 0x0FFF
 _TMP117_RESOLUTION = 0.0078125  # Resolution of the device, found on (page 1 of datasheet)
 
 _CONTINUOUS_CONVERSION_MODE = 0b00  # Continuous Conversion Mode
 _ONE_SHOT_MODE = 0b11  # One Shot Conversion Mode
 _SHUTDOWN_MODE = 0b01  # Shutdown Conversion Mode
 
+# Active conversion time per averaged sample: ~15.5 ms typ / 17.5 ms max (datasheet ref 5/7).
+# A one-shot's total time = (AVG sample count) x this; used to wait a one-shot out
+# deterministically instead of polling the clear-on-read Data_Ready flag (see
+# _set_mode_and_wait_for_measurement).
+_MAX_SINGLE_CONVERSION_S = 0.0175
+_CONVERSION_WAIT_MARGIN_S = 0.002  # small guard for scheduling jitter
+
 AlertStatus = namedtuple("AlertStatus", ["high_alert", "low_alert"])
 
 
 def _convert_to_integer(bytes_to_convert: bytearray) -> int:
-    """Use bitwise operators to convert the bytes into integers."""
-    integer = None
+    """Combine a big-endian byte sequence into a single integer.
+
+    :param bytearray bytes_to_convert: bytes in most-significant-first order.
+    :return: the combined unsigned integer value.
+    :rtype: int
+
+    .. note::
+        The numeric result is correct for any input: the original ``if not integer``
+        idiom skips *leading* zero bytes, but leading zeros do not change an integer's
+        value (verified by round-trip). The only behavioral change here is returning
+        ``0`` (not ``None``) for an empty input, to honor the ``-> int`` contract.
+    """
+    # Start the accumulator at 0 (was None) so an empty input returns int(0), not None,
+    # matching the -> int annotation. Numeric results are otherwise identical.
+    integer = 0
     for chunk in bytes_to_convert:
-        if not integer:
-            integer = chunk
-        else:
-            integer <<= 8
-            integer |= chunk
+        integer <<= 8
+        integer |= chunk
     return integer
 
 
@@ -132,8 +150,15 @@ class MeasurementDelay(CV):
 
 MeasurementDelay.add_values(
     (
-        ("DELAY_0_0015_S", 0b000, 0.00155, None),
-        ("DELAY_0_125_S", 0b01, 0.125, None),
+        # PR1 fix #5
+        # CONV=000 selects a 15.5 ms minimum cycle (datasheet ref 5), i.e. 0.0155 s.
+        # The display value read 0.00155 s (10x low). Register code 0b000 is unchanged;
+        # this only affects the human-readable value in MeasurementDelay.string.
+        # Keep old incorrect label DELAY_0_0015_S to not break old code using the
+        # previous versions wrong label
+        ("DELAY_0_0015_S", 0b000, 0.0155, None),  # Kept for compatibility
+        ("DELAY_0_0155_S", 0b000, 0.0155, None),
+        ("DELAY_0_125_S", 0b001, 0.125, None),
         ("DELAY_0_250_S", 0b010, 0.250, None),
         ("DELAY_0_500_S", 0b011, 0.500, None),
         ("DELAY_1_S", 0b100, 1, None),
@@ -187,36 +212,85 @@ class TMP117:
     _soft_reset = RWBit(_CONFIGURATION, 1, 2, False)
 
     def __init__(self, i2c_bus: I2C, address: int = _I2C_ADDR):
+        """Create a driver for a TMP117 or TMP119 on the given I2C bus.
+
+        :param ~busio.I2C i2c_bus: the I2C bus the sensor is connected to.
+        :param int address: the 7-bit I2C address (0x48-0x4B, default 0x48).
+        :raises AttributeError: if no TMP117/TMP119-family device answers at ``address``.
+
+        .. note::
+            The device-ID register reports a 16-bit value whose **upper nibble is a
+            silicon-revision field**, not a part number: TMP117 = ``0x0117``,
+            TMP119 = ``0x2117``, both sharing DID[11:0] = ``0x117``. The check below
+            matches that shared field so future silicon revisions are still accepted.
+        """
         self.i2c_device = i2c_device.I2CDevice(i2c_bus, address)
-        if self._part_id not in {_DEVICE_ID_VALUE, _TMP119_ID_VALUE}:
+
+        # Match on DID[11:0] == 0x117 instead of the full 16-bit value. The high nibble
+        # is a revision field, so hard-coding {0x0117, 0x2117} rejects any future
+        # revision of the same part. Failure-surface change: __init__ now raises in
+        # strictly fewer cases (accepts more valid silicon); it never newly rejects a
+        # part the old check accepted.
+        if (self._part_id & _DEVICE_ID_MASK) != _DEVICE_ID_DID:
             raise AttributeError("Cannot find a TMP117 or TMP119")
         # currently set when `alert_status` is read, but not exposed
         self.reset()
         self.initialize()
 
-    def reset(self):
-        """Reset the sensor to its unconfigured power-on state"""
-        self._soft_reset = True
+    def reset(self) -> None:
+        """Reset the sensor to its unconfigured power-on state.
 
-    def initialize(self):
+        :return: ``None``
+        :rtype: None
+
+        .. note::
+            A software reset takes up to 2 ms to complete (datasheet ref 7); this
+            method waits that long so a configuration write issued immediately
+            afterward is not lost.
+        """
+        self._soft_reset = True
+        # Wait tRESET (2 ms, datasheet ref 7) before returning. Previously reset()
+        # returned immediately and initialize() could write config mid-reset.
+        time.sleep(0.002)
+
+    def initialize(self) -> None:
         """Configure the sensor with sensible defaults. `initialize` is primarily provided to be
         called after `reset`, however it can also be used to easily set the sensor to a known
-        configuration"""
+        configuration
+
+        :return: ``None``
+        :rtype: None
+        """
         # Datasheet specifies that reset will finish in 2ms however by default the first
         # conversion will be averaged 8x and take 1s
         # TODO: sleep depending on current averaging config
-        self._set_mode_and_wait_for_measurement(_CONTINUOUS_CONVERSION_MODE)  # one shot
+        self._set_mode_and_wait_for_measurement(_CONTINUOUS_CONVERSION_MODE)  # continuous
         time.sleep(1)
 
     @property
-    def temperature(self):
-        """The current measured temperature in degrees Celsius"""
+    def temperature(self) -> float:
+        """The current measured temperature in degrees Celsius.
+
+        :return: the most recent temperature in degrees Celsius.
+        :rtype: float
+
+        .. note::
+            In continuous-conversion mode this returns the most recent sample and does
+            not block. After a `reset` and before the first conversion completes, the
+            sensor reports -256 degrees C.
+        """
 
         return self._read_temperature()
 
     @property
-    def temperature_offset(self):
-        """User defined temperature offset to be added to measurements from `temperature`
+    def temperature_offset(self) -> float:
+        """User defined temperature offset to be added to measurements from `temperature`.
+
+        The offset is applied inside the sensor (added after linearization) and is in the
+        same -256 to +255.9921875 degrees C range as the temperature result.
+
+        :return: the configured offset in degrees Celsius.
+        :rtype: float
 
         .. code-block::python
 
@@ -239,45 +313,79 @@ class TMP117:
 
     @temperature_offset.setter
     def temperature_offset(self, value: float):
-        if value > 256 or value < -256:
-            raise AttributeError("temperature_offset must be from -256 to 256")
-        scaled_offset = int(value / _TMP117_RESOLUTION)
+        # PR1 fix #7
+        # Upper bound was `> 256`, which let 256 through; 256/LSB = 0x8000 overflows the
+        # signed-16 register and raised an opaque struct.error. Max representable is
+        # +255.9921875 C. round() (datasheet ref 3) replaces int() truncation, which was
+        # asymmetric and up to 1 LSB (7.8 m C) off; this changes the written raw by at
+        # most 1 LSB for inputs that are not already on the grid.
+        if value > 255.9921875 or value < -256:
+            raise AttributeError("temperature_offset must be from -256 to 255.9921875")
+        scaled_offset = round(value / _TMP117_RESOLUTION)
         self._raw_temperature_offset = scaled_offset
 
     @property
-    def high_limit(self):
+    def high_limit(self) -> float:
         """The high temperature limit in degrees Celsius. When the measured temperature exceeds this
         value, the `high_alert` attribute of the `alert_status` property will be True. See the
-        documentation for `alert_status` for more information"""
+        documentation for `alert_status` for more information.
+
+        :return: the high limit in degrees Celsius.
+        :rtype: float
+        """
 
         return self._raw_high_limit * _TMP117_RESOLUTION
 
     @high_limit.setter
     def high_limit(self, value: float):
-        if value > 256 or value < -256:
-            raise AttributeError("high_limit must be from 255 to -256")
-        scaled_limit = int(value / _TMP117_RESOLUTION)
+        # PR1 fix #8
+        # See fix #7: `> 256` let 256 overflow the signed-16 register; max is
+        # +255.9921875 C. round() replaces int() truncation (datasheet ref 3). The old
+        # message ("from 255 to -256") was also inconsistent with the offset setter.
+        if value > 255.9921875 or value < -256:
+            raise AttributeError("high_limit must be from -256 to 255.9921875")
+        scaled_limit = round(value / _TMP117_RESOLUTION)
         self._raw_high_limit = scaled_limit
 
     @property
-    def low_limit(self):
+    def low_limit(self) -> float:
         """The low  temperature limit in degrees Celsius. When the measured temperature goes below
         this value, the `low_alert` attribute of the `alert_status` property will be True. See the
-        documentation for `alert_status` for more information"""
+        documentation for `alert_status` for more information.
+
+        :return: the low limit in degrees Celsius.
+        :rtype: float
+        """
 
         return self._raw_low_limit * _TMP117_RESOLUTION
 
     @low_limit.setter
     def low_limit(self, value: float):
-        if value > 256 or value < -256:
-            raise AttributeError("low_limit must be from 255 to -256")
-        scaled_limit = int(value / _TMP117_RESOLUTION)
+        # PR1 fix #9
+        # See fix #7/#8: reject >= 256 (max +255.9921875 C) and round() the scaling.
+        if value > 255.9921875 or value < -256:
+            raise AttributeError("low_limit must be from -256 to 255.9921875")
+        scaled_limit = round(value / _TMP117_RESOLUTION)
         self._raw_low_limit = scaled_limit
 
     @property
-    def alert_status(self):
+    def alert_status(self) -> "AlertStatus":
         """The current triggered status of the high and low temperature alerts as a AlertStatus
         named tuple with attributes for the triggered status of each alert.
+
+        :return: an `AlertStatus` namedtuple ``(high_alert, low_alert)`` of booleans.
+        :rtype: AlertStatus
+
+        .. warning::
+            Reading this property reads the configuration register, which **clears the
+            latched HIGH/LOW alert flags in window mode** (`AlertMode.WINDOW`). Read it
+            once per loop and reuse the result; reading it twice can miss an alert that
+            the first read cleared. In hysteresis mode (`AlertMode.HYSTERESIS`) the flag
+            is not cleared by a register read.
+
+        .. note::
+            In hysteresis mode ``low_alert`` is always ``False`` (the low flag is
+            disabled); only ``high_alert`` is meaningful.
 
         .. code-block :: python
 
@@ -321,6 +429,9 @@ class TMP117:
         Note that each averaged measurement takes 15.5ms which means that larger numbers of averaged
         measurements may make the delay between new reported measurements to exceed the delay set
         by `measurement_delay`
+
+        :return: the current `AverageCount` register code (number of averaged samples).
+        :rtype: int
 
         .. code-block::python3
 
@@ -395,6 +506,9 @@ class TMP117:
         |                                        | a new `measurement_mode` is selected.                |
         +----------------------------------------+------------------------------------------------------+
 
+        :return: the current `MeasurementMode` register code.
+        :rtype: int
+
         """
         # pylint: enable=line-too-long
         return self._mode
@@ -413,6 +527,9 @@ class TMP117:
         current setting off `averaged_measurements` which determines the minimum
         time needed between reported measurements.
 
+        :return: the current `MeasurementDelay` register code.
+        :rtype: int
+
         .. code-block::python
 
             import time
@@ -425,7 +542,7 @@ class TMP117:
 
             # uncomment different options below to see how it affects the reported temperature
 
-            # tmp117.measurement_delay = MeasurementDelay.DELAY_0_0015_S
+            # tmp117.measurement_delay = MeasurementDelay.DELAY_0_0155_S
             # tmp117.measurement_delay = MeasurementDelay.DELAY_0_125_S
             # tmp117.measurement_delay = MeasurementDelay.DELAY_0_250_S
             # tmp117.measurement_delay = MeasurementDelay.DELAY_0_500_S
@@ -458,6 +575,9 @@ class TMP117:
         returning the measurement once complete. Once finished the sensor is placed into a low power
         state until :py:meth:`take_single_measurement` or `temperature` are read.
 
+        :return: the freshly measured temperature in degrees Celsius.
+        :rtype: float
+
         **Note:** if `averaged_measurements` is set to a high value there will be a notable
         delay before the temperature measurement is returned while the sensor takes the required
         number of measurements
@@ -466,7 +586,7 @@ class TMP117:
         return self._set_mode_and_wait_for_measurement(_ONE_SHOT_MODE)  # one shot
 
     @property
-    def alert_mode(self):
+    def alert_mode(self) -> int:
         """Sets the behavior of the `low_limit`, `high_limit`, and `alert_status` properties.
 
         When set to :py:const:`AlertMode.WINDOW`, the `high_limit` property will unset when the
@@ -477,7 +597,11 @@ class TMP117:
         `False` when the measured temperature goes below `low_limit`. In this mode, the `low_limit`
         property of `alert_status` will not be set.
 
-        The default is :py:const:`AlertMode.WINDOW`"""
+        The default is :py:const:`AlertMode.WINDOW`
+
+        :return: the current `AlertMode` register code.
+        :rtype: int
+        """
 
         return self._raw_alert_mode
 
@@ -488,8 +612,17 @@ class TMP117:
         self._raw_alert_mode = value
 
     @property
-    def serial_number(self):
-        """A 48-bit, factory-set unique identifier for the device."""
+    def serial_number(self) -> int:
+        """A 48-bit, factory-set unique identifier for the device.
+
+        :return: the 48-bit unique ID from EEPROM as an integer.
+        :rtype: int
+
+        .. note::
+            This reads the factory NIST-traceability ID stored in EEPROM1-3. It is only
+            meaningful if those EEPROM locations have not been reprogrammed for
+            general-purpose use.
+        """
         eeprom1_data = bytearray(2)
         eeprom2_data = bytearray(2)
         eeprom3_data = bytearray(2)
@@ -514,19 +647,38 @@ class TMP117:
 
     def _set_mode_and_wait_for_measurement(self, mode: int) -> float:
         self._mode = mode
-        # poll for data ready
-        while not self._read_status()[2]:
-            time.sleep(0.001)
-
+        # PR1 fix #10
+        # NOTE: in any one-shot / terminal mode (one that ends in SHUTDOWN), do NOT poll a
+        # clear-on-read status flag to detect completion. Reading the config register
+        # clears Data_Ready (clear-on-read), and one-shot drops back to SHUTDOWN the
+        # instant its single conversion completes -- so if a poll read lands on the
+        # conversion-complete edge and clears the just-set flag, it is never re-asserted
+        # and the loop hangs forever (Adafruit_CircuitPython_TMP117 issue #10). Continuous
+        # mode re-asserts Data_Ready every cycle, so a flag lost to the same race is
+        # harmlessly re-set next conversion; a bounded poll stays correct there and gives
+        # the lowest latency, so it is kept for continuous.
+        if mode == _ONE_SHOT_MODE:
+            # One-shot duration depends only on AVG (CONV is ignored in one-shot), so wait
+            # the deterministic worst-case conversion time for the current averaging
+            # setting, then read -- no Data_Ready involved, no race.
+            samples = AverageCount.string[self._raw_averaged_measurements]
+            time.sleep(samples * _MAX_SINGLE_CONVERSION_S + _CONVERSION_WAIT_MARGIN_S)
+        elif mode == _CONTINUOUS_CONVERSION_MODE:
+            # poll for data ready (safe and low-latency in continuous; see note above)
+            while not self._read_status()[2]:
+                time.sleep(0.001)
+        # SHUTDOWN (or any non-converting mode): no new conversion is coming, so don't
+        # wait for a Data_Ready that will never arrive -- return the last stored result.
+        # (This also removes a latent hang when measurement_mode is set to SHUTDOWN.)
         return self._read_temperature()
 
-    # eeprom write enable to set defaults for limits and config
-    # requires context manager or something to perform a general call reset
-
-    def _read_status(self) -> Tuple[int, int, int]:
+    def _read_status(self) -> Tuple[bool, bool, bool]:
         # 3 bits: high_alert, low_alert, data_ready
         status_flags = self._alert_status_data_ready
 
+        # Note: `&` binds tighter than `>` in Python, so `0b100 & status_flags > 0`
+        # parses as `(0b100 & status_flags) > 0` — the intended mask-then-test. (This is
+        # the opposite of C precedence; the parentheses are implied and correct.)
         high_alert = 0b100 & status_flags > 0
         low_alert = 0b010 & status_flags > 0
         data_ready = 0b001 & status_flags > 0
