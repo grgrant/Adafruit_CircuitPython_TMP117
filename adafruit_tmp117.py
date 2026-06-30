@@ -378,9 +378,9 @@ class TMP117:
 
         .. warning::
             Reading this property reads the configuration register, which **clears the
-            latched HIGH/LOW alert flags in window mode** (`AlertMode.WINDOW`). Read it
+            latched HIGH/LOW alert flags in window mode** (:py:const:`AlertMode.WINDOW`). Read it
             once per loop and reuse the result; reading it twice can miss an alert that
-            the first read cleared. In hysteresis mode (`AlertMode.HYSTERESIS`) the flag
+            the first read cleared. In hysteresis mode (:py:const:`AlertMode.HYSTERESIS`) the flag
             is not cleared by a register read.
 
         .. note::
