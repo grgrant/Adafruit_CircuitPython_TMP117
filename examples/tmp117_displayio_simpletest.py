@@ -16,16 +16,12 @@ import adafruit_tmp117
 # create a main_group to hold anything we want to show on the display.
 main_group = Group()
 
-# Initialize I2C bus and sensor.
-# First try the popular STEMMA_I2C on Feathers and QtPy among others
-try:
-    i2c = board.STEMMA_I2C()  # Built-in STEMMA QT connector
-except Exception:
-    i2c = None
-
-# If not available then try the board.I2C
-if i2c is None:
+# First try the STEMMA_I2C on Feathers and QtPy among others
+if hasattr(board, "STEMMA_I2C"):
+    i2c = board.STEMMA_I2C()
+else:
     i2c = board.I2C()  # uses board.SCL and board.SDA
+
 tmp117 = adafruit_tmp117.TMP117(i2c)
 
 # Create Label(s) to show the readings. If you have a very small
