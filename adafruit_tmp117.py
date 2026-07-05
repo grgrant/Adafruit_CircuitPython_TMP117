@@ -94,14 +94,7 @@ def _convert_to_integer(bytes_to_convert: bytearray) -> int:
     :return: the combined unsigned integer value.
     :rtype: int
 
-    .. note::
-        The numeric result is correct for any input: the original ``if not integer``
-        idiom skips *leading* zero bytes, but leading zeros do not change an integer's
-        value (verified by round-trip). The only behavioral change here is returning
-        ``0`` (not ``None``) for an empty input, to honor the ``-> int`` contract.
     """
-    # Start the accumulator at 0 (was None) so an empty input returns int(0), not None,
-    # matching the -> int annotation. Numeric results are otherwise identical.
     integer = 0
     for chunk in bytes_to_convert:
         integer <<= 8
@@ -150,13 +143,6 @@ class MeasurementDelay(CV):
 
 MeasurementDelay.add_values(
     (
-        # PR1 fix #5
-        # CONV=000 selects a 15.5 ms minimum cycle (datasheet ref 5), i.e. 0.0155 s.
-        # The display value read 0.00155 s (10x low). Register code 0b000 is unchanged;
-        # this only affects the human-readable value in MeasurementDelay.string.
-        # Keep old incorrect label DELAY_0_0015_S to not break old code using the
-        # previous versions wrong label
-        ("DELAY_0_0015_S", 0b000, 0.0155, None),  # Kept for compatibility
         ("DELAY_0_0155_S", 0b000, 0.0155, None),
         ("DELAY_0_125_S", 0b001, 0.125, None),
         ("DELAY_0_250_S", 0b010, 0.250, None),
@@ -313,12 +299,6 @@ class TMP117:
 
     @temperature_offset.setter
     def temperature_offset(self, value: float):
-        # PR1 fix #7
-        # Upper bound was `> 256`, which let 256 through; 256/LSB = 0x8000 overflows the
-        # signed-16 register and raised an opaque struct.error. Max representable is
-        # +255.9921875 C. round() (datasheet ref 3) replaces int() truncation, which was
-        # asymmetric and up to 1 LSB (7.8 m C) off; this changes the written raw by at
-        # most 1 LSB for inputs that are not already on the grid.
         if value > 255.9921875 or value < -256:
             raise AttributeError("temperature_offset must be from -256 to 255.9921875")
         scaled_offset = round(value / _TMP117_RESOLUTION)
@@ -338,10 +318,6 @@ class TMP117:
 
     @high_limit.setter
     def high_limit(self, value: float):
-        # PR1 fix #8
-        # See fix #7: `> 256` let 256 overflow the signed-16 register; max is
-        # +255.9921875 C. round() replaces int() truncation (datasheet ref 3). The old
-        # message ("from 255 to -256") was also inconsistent with the offset setter.
         if value > 255.9921875 or value < -256:
             raise AttributeError("high_limit must be from -256 to 255.9921875")
         scaled_limit = round(value / _TMP117_RESOLUTION)
@@ -361,8 +337,6 @@ class TMP117:
 
     @low_limit.setter
     def low_limit(self, value: float):
-        # PR1 fix #9
-        # See fix #7/#8: reject >= 256 (max +255.9921875 C) and round() the scaling.
         if value > 255.9921875 or value < -256:
             raise AttributeError("low_limit must be from -256 to 255.9921875")
         scaled_limit = round(value / _TMP117_RESOLUTION)
@@ -647,7 +621,6 @@ class TMP117:
 
     def _set_mode_and_wait_for_measurement(self, mode: int) -> float:
         self._mode = mode
-        # PR1 fix #10
         # NOTE: in any one-shot / terminal mode (one that ends in SHUTDOWN), do NOT poll a
         # clear-on-read status flag to detect completion. Reading the config register
         # clears Data_Ready (clear-on-read), and one-shot drops back to SHUTDOWN the
@@ -676,9 +649,6 @@ class TMP117:
         # 3 bits: high_alert, low_alert, data_ready
         status_flags = self._alert_status_data_ready
 
-        # Note: `&` binds tighter than `>` in Python, so `0b100 & status_flags > 0`
-        # parses as `(0b100 & status_flags) > 0` — the intended mask-then-test. (This is
-        # the opposite of C precedence; the parentheses are implied and correct.)
         high_alert = 0b100 & status_flags > 0
         low_alert = 0b010 & status_flags > 0
         data_ready = 0b001 & status_flags > 0
