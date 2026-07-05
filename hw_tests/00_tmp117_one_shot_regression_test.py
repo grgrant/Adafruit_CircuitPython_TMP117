@@ -140,12 +140,10 @@ def part_b_regression_guard(tmp):
 
 
 def main():
-    # First try the popular STEMMA_I2C on Feathers and QtPy among others
-    try:
-        i2c = board.STEMMA_I2C()  # Built-in STEMMA QT connector
-    except Exception:  # noqa: BLE001 - board may not expose STEMMA_I2C
-        i2c = None
-    if i2c is None:
+    # First try the STEMMA_I2C on Feathers and QtPy among others
+    if hasattr(board, "STEMMA_I2C"):
+        i2c = board.STEMMA_I2C()
+    else:
         i2c = board.I2C()  # uses board.SCL and board.SDA
 
     tmp117 = TMP117(i2c)
