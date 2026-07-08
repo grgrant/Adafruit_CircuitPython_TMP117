@@ -77,10 +77,7 @@ _CONTINUOUS_CONVERSION_MODE = 0b00  # Continuous Conversion Mode
 _ONE_SHOT_MODE = 0b11  # One Shot Conversion Mode
 _SHUTDOWN_MODE = 0b01  # Shutdown Conversion Mode
 
-# Active conversion time per averaged sample: ~15.5 ms typ / 17.5 ms max (datasheet ref 5/7).
-# A one-shot's total time = (AVG sample count) x this; used to wait a one-shot out
-# deterministically instead of polling the clear-on-read Data_Ready flag (see
-# _set_mode_and_wait_for_measurement).
+# Conversion time 15.5 ms typical 17.5 ms max (DS Sec 6.5)
 _MAX_SINGLE_CONVERSION_S = 0.0175
 _CONVERSION_WAIT_MARGIN_S = 0.002  # small guard for scheduling jitter
 
@@ -229,14 +226,10 @@ class TMP117:
         :return: ``None``
         :rtype: None
 
-        .. note::
-            A software reset takes up to 2 ms to complete (datasheet ref 7); this
-            method waits that long so a configuration write issued immediately
-            afterward is not lost.
         """
         self._soft_reset = True
-        # Wait tRESET (2 ms, datasheet ref 7) before returning. Previously reset()
-        # returned immediately and initialize() could write config mid-reset.
+        # Wait out the Soft_Reset duration (2 ms Table 7-6) so a config write issued
+        # immediately afterward is not lost.
         time.sleep(0.002)
 
     def initialize(self) -> None:
@@ -633,7 +626,7 @@ class TMP117:
         if mode == _ONE_SHOT_MODE:
             # One-shot duration depends only on AVG (CONV is ignored in one-shot), so wait
             # the deterministic worst-case conversion time for the current averaging
-            # setting, then read -- no Data_Ready involved, no race.
+            # setting, then read -- no Data_Ready involved, no race. (DS Sec 7.3.2 Averaging)
             samples = AverageCount.string[self._raw_averaged_measurements]
             time.sleep(samples * _MAX_SINGLE_CONVERSION_S + _CONVERSION_WAIT_MARGIN_S)
         elif mode == _CONTINUOUS_CONVERSION_MODE:
