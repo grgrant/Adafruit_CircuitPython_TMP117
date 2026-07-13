@@ -266,7 +266,7 @@ class TMP117:
         """User defined temperature offset to be added to measurements from `temperature`.
 
         The offset is applied inside the sensor (added after linearization) and is in the
-        same -256 to +255.9921875 degrees C range as the temperature result.
+        same -256 to +255.9921 degrees C range as the temperature result.
 
         :return: the configured offset in degrees Celsius.
         :rtype: float
@@ -292,8 +292,8 @@ class TMP117:
 
     @temperature_offset.setter
     def temperature_offset(self, value: float):
-        if value > 255.9921875 or value < -256:
-            raise AttributeError("temperature_offset must be from -256 to 255.9921875")
+        if value > 255.9921 or value < -256:
+            raise AttributeError("temperature_offset must be from -256 to 255.9921")
         scaled_offset = round(value / _TMP117_RESOLUTION)
         self._raw_temperature_offset = scaled_offset
 
@@ -311,8 +311,8 @@ class TMP117:
 
     @high_limit.setter
     def high_limit(self, value: float):
-        if value > 255.9921875 or value < -256:
-            raise AttributeError("high_limit must be from -256 to 255.9921875")
+        if value > 255.9921 or value < -256:
+            raise AttributeError("high_limit must be from -256 to 255.9921")
         scaled_limit = round(value / _TMP117_RESOLUTION)
         self._raw_high_limit = scaled_limit
 
@@ -330,8 +330,8 @@ class TMP117:
 
     @low_limit.setter
     def low_limit(self, value: float):
-        if value > 255.9921875 or value < -256:
-            raise AttributeError("low_limit must be from -256 to 255.9921875")
+        if value > 255.9921 or value < -256:
+            raise AttributeError("low_limit must be from -256 to 255.9921")
         scaled_limit = round(value / _TMP117_RESOLUTION)
         self._raw_low_limit = scaled_limit
 
